@@ -1,4 +1,4 @@
-# CLAUDE.md — BotHub Codebase Guide
+# CLAUDE.md — BotHub & Trading Bot Codebase Guide
 
 ## Project Overview
 
@@ -436,3 +436,518 @@ There is no automated test suite. Testing is done manually via Telegram commands
 - Test commands manually in a private Telegram chat
 - Check `.helpme` and `.syntax` output matches your docstrings
 - Verify `NO_LOAD` and `LOAD` filtering works if your plugin is optional
+
+---
+
+---
+
+# Trading Bot & Expert Advisor (EA) Guide
+
+This section documents the standalone trading bot project — separate from the Telegram userbot above. It targets **MetaTrader 4/5 Expert Advisors (MQL)** and **Forex broker REST APIs** (OANDA, IC Markets).
+
+---
+
+## Project Structure (Trading Bot)
+
+```
+trading/
+├── ea/                         # MetaTrader Expert Advisors (MQL4/MQL5)
+│   ├── mql4/
+│   │   ├── Experts/            # EA source files (.mq4)
+│   │   ├── Indicators/         # Custom indicator files (.mq4)
+│   │   └── Include/            # Shared header files (.mqh)
+│   └── mql5/
+│       ├── Experts/            # EA source files (.mq5)
+│       ├── Indicators/         # Custom indicators (.mq5)
+│       └── Include/            # Shared headers (.mqh)
+│
+├── broker/                     # Python broker API clients
+│   ├── oanda/
+│   │   ├── client.py           # OANDA REST v20 wrapper
+│   │   ├── stream.py           # Pricing stream (WebSocket)
+│   │   └── orders.py           # Order management
+│   └── icmarkets/
+│       ├── client.py           # IC Markets cTrader / FIX API wrapper
+│       └── orders.py
+│
+├── strategy/                   # Strategy logic (Python)
+│   ├── base.py                 # Abstract Strategy class
+│   ├── indicators.py           # TA indicators (MA, RSI, MACD, ATR, etc.)
+│   └── <strategy_name>.py      # One file per strategy
+│
+├── risk/
+│   ├── manager.py              # Position sizing, drawdown limits
+│   └── rules.py                # Risk rules (max lots, daily loss cap, etc.)
+│
+├── data/
+│   ├── feed.py                 # Live price feed handler
+│   ├── history.py              # Historical OHLCV fetching
+│   └── store.py                # Local tick/candle storage (SQLite/CSV)
+│
+├── backtest/
+│   ├── engine.py               # Event-driven backtesting loop
+│   ├── report.py               # P&L, Sharpe, drawdown reporting
+│   └── optimizer.py            # Parameter optimization
+│
+├── config/
+│   ├── settings.py             # Central config (loaded from .env)
+│   └── .env.example            # Environment variable template
+│
+├── tests/
+│   ├── test_strategy.py
+│   ├── test_risk.py
+│   └── test_orders.py
+│
+├── main.py                     # Entry point — live trading runner
+├── requirements.txt            # Python dependencies
+└── README.md
+```
+
+---
+
+## MetaTrader Expert Advisor (MQL) Development
+
+### MQL4 vs MQL5
+
+| Feature | MQL4 | MQL5 |
+|---|---|---|
+| Platform | MetaTrader 4 | MetaTrader 5 |
+| Language style | C-like, simpler | C++ OOP, stricter |
+| Brokers | Most retail forex brokers | Growing adoption |
+| Backtesting | Single-threaded | Multi-threaded, faster |
+| File extension | `.mq4` / `.ex4` | `.mq5` / `.ex5` |
+
+Prefer **MQL5** for new EAs unless the broker only supports MT4.
+
+### EA File Structure (MQL5 example)
+
+```mql5
+//+------------------------------------------------------------------+
+//| MyStrategy.mq5                                                   |
+//+------------------------------------------------------------------+
+#property copyright "BotHub Trading"
+#property version   "1.00"
+#property strict
+
+// Input parameters (visible in MT5 Strategy Tester & Attach dialog)
+input double LotSize    = 0.01;
+input int    MAPeriod   = 20;
+input double StopLoss   = 50.0;   // Points
+input double TakeProfit = 100.0;  // Points
+
+// Global handles
+int maHandle;
+
+//+------------------------------------------------------------------+
+//| Expert initialization                                            |
+//+------------------------------------------------------------------+
+int OnInit() {
+    maHandle = iMA(_Symbol, PERIOD_CURRENT, MAPeriod, 0, MODE_SMA, PRICE_CLOSE);
+    if (maHandle == INVALID_HANDLE) return INIT_FAILED;
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization                                          |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason) {
+    IndicatorRelease(maHandle);
+}
+
+//+------------------------------------------------------------------+
+//| Called on every new tick                                         |
+//+------------------------------------------------------------------+
+void OnTick() {
+    // Only act on new bar open
+    static datetime lastBar = 0;
+    datetime currentBar = iTime(_Symbol, PERIOD_CURRENT, 0);
+    if (currentBar == lastBar) return;
+    lastBar = currentBar;
+
+    // Get indicator value
+    double maBuffer[];
+    ArraySetAsSeries(maBuffer, true);
+    CopyBuffer(maHandle, 0, 0, 3, maBuffer);
+
+    double close = iClose(_Symbol, PERIOD_CURRENT, 1);
+    double ma    = maBuffer[1];
+
+    // Entry logic
+    if (close > ma && PositionsTotal() == 0) {
+        OpenBuy();
+    } else if (close < ma && PositionsTotal() == 0) {
+        OpenSell();
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Open a BUY market order                                          |
+//+------------------------------------------------------------------+
+void OpenBuy() {
+    MqlTradeRequest req = {};
+    MqlTradeResult  res = {};
+    req.action    = TRADE_ACTION_DEAL;
+    req.symbol    = _Symbol;
+    req.volume    = LotSize;
+    req.type      = ORDER_TYPE_BUY;
+    req.price     = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    req.sl        = req.price - StopLoss  * _Point;
+    req.tp        = req.price + TakeProfit * _Point;
+    req.deviation = 10;
+    req.magic     = 123456;
+    req.comment   = "MyStrategy BUY";
+    OrderSend(req, res);
+}
+```
+
+### EA Coding Conventions (MQL)
+
+- **Always use `input` for parameters** — never hardcode values that a user might want to change
+- **Use magic numbers** — set a unique `magic` integer per EA to identify its orders
+- **Check `PositionsTotal()` / `OrdersTotal()`** before opening new positions to avoid duplicates
+- **New-bar guard** — use a `static datetime lastBar` check inside `OnTick()` to run logic once per candle, not on every tick
+- **Avoid blocking calls** in `OnTick()` — no `Sleep()`, no heavy loops
+- **Handle errors** — check `res.retcode` after `OrderSend()`:
+  ```mql5
+  if (res.retcode != TRADE_RETCODE_DONE) {
+      Print("OrderSend failed: ", res.retcode, " ", res.comment);
+  }
+  ```
+- **Use `_Point` and `_Digits`** — never hardcode pip values; they vary by instrument
+- **Normalize prices** — `NormalizeDouble(price, _Digits)` before using in orders
+- **Stop Loss / Take Profit** — always set; never trade without a defined exit
+- **Separate concerns** — put indicator logic in `/Include/` headers, keep EA files focused on entry/exit logic
+
+### EA Testing Workflow (MetaTrader Strategy Tester)
+
+1. Compile the `.mq5` file in MetaEditor (F7)
+2. Open Strategy Tester (Ctrl+R in MT5)
+3. Select EA, symbol, timeframe, date range
+4. Run **Visual Mode** first to spot obvious bugs
+5. Run **Every Tick** mode for accurate backtest
+6. Check: total trades, win rate, profit factor (>1.5 target), max drawdown (<20% target)
+7. Use **Optimization** tab to find parameter ranges — avoid overfitting
+
+---
+
+## Forex Broker API (Python)
+
+### OANDA REST v20
+
+OANDA provides a fully documented REST API for live and paper trading.
+
+**Authentication:**
+```python
+# config/.env
+OANDA_API_KEY=your_api_key_here
+OANDA_ACCOUNT_ID=001-001-XXXXXXX-001
+OANDA_ENV=practice   # or "live"
+```
+
+**Base client (`broker/oanda/client.py`):**
+```python
+import os
+import requests
+
+BASE_URLS = {
+    "practice": "https://api-fxpractice.oanda.com",
+    "live":     "https://api-fxtrade.oanda.com",
+}
+
+class OandaClient:
+    def __init__(self):
+        self.api_key    = os.environ["OANDA_API_KEY"]
+        self.account_id = os.environ["OANDA_ACCOUNT_ID"]
+        self.base_url   = BASE_URLS[os.environ.get("OANDA_ENV", "practice")]
+        self.session    = requests.Session()
+        self.session.headers.update({
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type":  "application/json",
+        })
+
+    def get_account(self):
+        r = self.session.get(f"{self.base_url}/v3/accounts/{self.account_id}")
+        r.raise_for_status()
+        return r.json()
+
+    def get_price(self, instrument: str) -> dict:
+        r = self.session.get(
+            f"{self.base_url}/v3/accounts/{self.account_id}/pricing",
+            params={"instruments": instrument}
+        )
+        r.raise_for_status()
+        return r.json()["prices"][0]
+
+    def place_market_order(self, instrument: str, units: int,
+                           sl_price: float = None, tp_price: float = None) -> dict:
+        order = {
+            "order": {
+                "type":       "MARKET",
+                "instrument": instrument,
+                "units":      str(units),  # positive = buy, negative = sell
+            }
+        }
+        if sl_price:
+            order["order"]["stopLossOnFill"] = {"price": f"{sl_price:.5f}"}
+        if tp_price:
+            order["order"]["takeProfitOnFill"] = {"price": f"{tp_price:.5f}"}
+
+        r = self.session.post(
+            f"{self.base_url}/v3/accounts/{self.account_id}/orders",
+            json=order
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def close_trade(self, trade_id: str) -> dict:
+        r = self.session.put(
+            f"{self.base_url}/v3/accounts/{self.account_id}/trades/{trade_id}/close"
+        )
+        r.raise_for_status()
+        return r.json()
+```
+
+**Live price streaming:**
+```python
+# broker/oanda/stream.py
+import sseclient, requests, os, json
+
+def stream_prices(instruments: list, callback):
+    url = f"https://stream-fxpractice.oanda.com/v3/accounts/{os.environ['OANDA_ACCOUNT_ID']}/pricing/stream"
+    headers = {"Authorization": f"Bearer {os.environ['OANDA_API_KEY']}"}
+    params  = {"instruments": ",".join(instruments)}
+    r = requests.get(url, headers=headers, params=params, stream=True)
+    for event in sseclient.SSEClient(r).events():
+        tick = json.loads(event.data)
+        if tick.get("type") == "PRICE":
+            callback(tick)
+```
+
+### IC Markets (cTrader Open API)
+
+IC Markets supports cTrader's Open API (protobuf-based WebSocket):
+
+```
+pip install ctrader-open-api
+```
+
+Key concepts:
+- **Application auth** → client credentials (clientId, clientSecret)
+- **Account auth** → access token per account
+- **Spots** → subscribe to symbol price updates
+- **New order** → `ProtoOANewOrderReq` message
+
+Refer to the [cTrader Open API docs](https://help.ctrader.com/open-api/) for full message reference. Use the official Python sample as a starting point.
+
+---
+
+## Strategy Development
+
+### Abstract Base Class
+
+```python
+# strategy/base.py
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
+
+class Signal(Enum):
+    BUY  = "BUY"
+    SELL = "SELL"
+    FLAT = "FLAT"
+
+@dataclass
+class Bar:
+    time:   float
+    open:   float
+    high:   float
+    low:    float
+    close:  float
+    volume: float
+
+class Strategy(ABC):
+    def __init__(self, params: dict):
+        self.params = params
+
+    @abstractmethod
+    def on_bar(self, bars: list[Bar]) -> Signal:
+        """Called on each new completed candle. Return a Signal."""
+        ...
+
+    @abstractmethod
+    def name(self) -> str:
+        ...
+```
+
+### Example Strategy
+
+```python
+# strategy/ma_crossover.py
+from .base import Strategy, Signal, Bar
+
+class MACrossover(Strategy):
+    def name(self): return "MA Crossover"
+
+    def on_bar(self, bars: list[Bar]) -> Signal:
+        fast = self.params["fast_period"]
+        slow = self.params["slow_period"]
+        if len(bars) < slow:
+            return Signal.FLAT
+        fast_ma = sum(b.close for b in bars[-fast:]) / fast
+        slow_ma = sum(b.close for b in bars[-slow:]) / slow
+        if fast_ma > slow_ma:
+            return Signal.BUY
+        elif fast_ma < slow_ma:
+            return Signal.SELL
+        return Signal.FLAT
+```
+
+### Coding Conventions (Python Trading Bot)
+
+- **Never use `time.sleep()` in live loops** — use async/await or event-driven patterns
+- **All prices are floats** — use `round(price, instrument_digits)` before order submission
+- **Units vs lots** — OANDA uses integer units (1 unit = 1 base currency); MT5 uses lots (0.01 minimum for most brokers)
+- **Always define SL/TP at order time** — never place a naked order in live trading
+- **Paper trade first** — use `OANDA_ENV=practice` or MT5 demo account; never test on live funds
+- **Config via env vars** — no API keys or account IDs in source files
+- **Log every order** — write to a structured log file with timestamp, instrument, direction, size, price, SL, TP
+- **Idempotent order logic** — check open positions before placing new orders; avoid doubling up
+- **Separate signal from execution** — strategy returns a `Signal`; a separate executor handles broker calls
+- **Backtest before live** — every strategy must have a backtest run before being deployed live
+
+---
+
+## Risk Management Rules
+
+Always enforce these in `risk/manager.py` before any order is placed:
+
+| Rule | Default | Notes |
+|---|---|---|
+| Max lot size | 2% of account balance | Calculated per trade |
+| Max open trades | 3 | Per instrument, per direction |
+| Daily loss limit | 5% of account balance | Pause trading if hit |
+| Max drawdown | 15% of peak balance | Stop all trading, alert |
+| Min SL distance | 10 pips | Reject orders with tighter SL |
+| Spread check | < 3 pips for majors | Skip trade during high spread |
+
+```python
+# risk/manager.py
+class RiskManager:
+    def __init__(self, account_balance: float, params: dict):
+        self.balance = account_balance
+        self.params  = params
+
+    def lot_size(self, sl_pips: float, pip_value: float) -> float:
+        risk_amount = self.balance * self.params["risk_pct"]
+        return round(risk_amount / (sl_pips * pip_value), 2)
+
+    def can_trade(self, open_positions: int, daily_loss: float) -> bool:
+        if open_positions >= self.params["max_trades"]:
+            return False
+        if daily_loss >= self.balance * self.params["daily_loss_limit"]:
+            return False
+        return True
+```
+
+---
+
+## Backtesting
+
+The backtest engine (`backtest/engine.py`) should be event-driven — mirroring how the live system works:
+
+1. Feed historical OHLCV bars one at a time to `strategy.on_bar()`
+2. On a signal, call `risk.manager.can_trade()` then simulate order fill at next bar open
+3. Track open trades, apply SL/TP hits bar by bar
+4. Produce a trade log and summary report
+
+**Key metrics to report:**
+- Net profit / loss
+- Win rate (%)
+- Profit factor (gross profit / gross loss) — target > 1.5
+- Max drawdown (%) — target < 20%
+- Sharpe ratio — target > 1.0
+- Average trade duration
+- Total trades (minimum ~100 for statistical significance)
+
+---
+
+## Environment Variables (Trading Bot)
+
+```bash
+# config/.env.example
+
+# OANDA
+OANDA_API_KEY=
+OANDA_ACCOUNT_ID=
+OANDA_ENV=practice          # practice | live
+
+# IC Markets / cTrader
+CTRADER_CLIENT_ID=
+CTRADER_CLIENT_SECRET=
+CTRADER_ACCESS_TOKEN=
+CTRADER_ACCOUNT_ID=
+CTRADER_ENV=demo            # demo | live
+
+# Risk settings
+RISK_PCT=0.02               # 2% per trade
+MAX_OPEN_TRADES=3
+DAILY_LOSS_LIMIT=0.05       # 5% of balance
+
+# Logging
+LOG_LEVEL=INFO
+LOG_FILE=logs/trading.log
+```
+
+---
+
+## Dependencies (Trading Bot)
+
+```
+# requirements.txt
+
+# Broker APIs
+requests>=2.31
+sseclient-py>=1.8           # OANDA price streaming
+ctrader-open-api>=2.0       # IC Markets cTrader
+
+# Technical analysis
+pandas>=2.0
+numpy>=1.26
+ta>=0.11                    # TA-Lib wrapper (RSI, MACD, BB, ATR, etc.)
+
+# Backtesting
+vectorbt>=0.26              # Fast vectorized backtest (optional)
+
+# Config
+python-dotenv>=1.0
+
+# Testing
+pytest>=8.0
+pytest-asyncio>=0.23
+```
+
+> **Note:** For MT4/MT5 EA development, MetaEditor (bundled with the MetaTrader terminal) is the only required tool — no extra Python dependencies.
+
+---
+
+## File Naming & Organisation Conventions
+
+| Context | Convention | Example |
+|---|---|---|
+| MQL EA files | PascalCase | `MACrossover.mq5` |
+| MQL indicator files | PascalCase | `SuperTrend.mq5` |
+| MQL include/header | PascalCase | `RiskManager.mqh` |
+| Python modules | snake_case | `ma_crossover.py` |
+| Python classes | PascalCase | `class MACrossover` |
+| Config keys | UPPER_SNAKE | `OANDA_API_KEY` |
+| Trade log entries | ISO 8601 timestamps | `2025-01-15T09:30:00Z` |
+
+---
+
+## Security (Trading Bot)
+
+- **Never commit `.env`** files or any file containing API keys or account IDs
+- **Use `practice`/`demo` accounts exclusively** until a strategy has a verified backtest + forward test period
+- **Rate limits** — OANDA REST allows 100 requests/second; IC Markets cTrader is event-driven (no polling)
+- **IP whitelisting** — enable it in your broker dashboard if supported
+- **Revoke API keys immediately** if a repository is accidentally made public
