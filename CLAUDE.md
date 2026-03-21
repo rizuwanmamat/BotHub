@@ -441,6 +441,91 @@ There is no automated test suite. Testing is done manually via Telegram commands
 
 ---
 
+# AI Agents & Skills for Trading EA Development
+
+This section documents the sub-agents and slash command skills defined in
+`.claude/agents/` and `.claude/commands/`. They are purpose-built for the
+trading bot and Expert Advisor development workflow.
+
+---
+
+## Sub-Agents (`.claude/agents/`)
+
+Sub-agents are invoked automatically by Claude when the task matches their
+description, or explicitly via the Agent tool. Each agent has a focused role
+and a restricted tool set.
+
+| Agent | File | Invoke When |
+|-------|------|-------------|
+| `ea-developer` | `ea-developer.md` | Writing, modifying, or fixing MQL4/MQL5 EA and indicator files |
+| `strategy-researcher` | `strategy-researcher.md` | Designing a new strategy, researching indicators, producing a spec doc |
+| `backtest-analyst` | `backtest-analyst.md` | Interpreting MT4/MT5 Strategy Tester reports or Python backtest output |
+| `risk-validator` | `risk-validator.md` | Auditing EA inputs or Python config against risk rules before deployment |
+| `broker-api-developer` | `broker-api-developer.md` | Building or debugging OANDA / IC Markets cTrader Python client code |
+| `market-data-analyst` | `market-data-analyst.md` | Fetching historical candles, computing indicators, preparing backtest data |
+
+### Agent Responsibilities at a Glance
+
+```
+strategy-researcher   →  defines WHAT to build (spec doc)
+        ↓
+ea-developer          →  builds the MQL EA or Python strategy
+market-data-analyst   →  fetches data for backtesting
+        ↓
+backtest-analyst      →  evaluates the backtest results
+        ↓
+risk-validator        →  approves risk parameters before deployment
+        ↓
+broker-api-developer  →  connects to live/demo broker for execution
+```
+
+---
+
+## Slash Command Skills (`.claude/commands/`)
+
+Skills are slash commands invoked by the user to trigger a multi-step workflow.
+
+| Command | File | Purpose |
+|---------|------|---------|
+| `/ea-new` | `ea-new.md` | Scaffold a new EA from template (MQL4 or MQL5) |
+| `/ea-review` | `ea-review.md` | Code quality + risk audit on one or all EAs |
+| `/strategy-design` | `strategy-design.md` | Research and produce a strategy spec document |
+| `/backtest-analyze` | `backtest-analyze.md` | Parse and evaluate a backtest report |
+| `/risk-check` | `risk-check.md` | Validate risk parameters before any deployment |
+| `/fetch-data` | `fetch-data.md` | Download historical OHLCV data from OANDA |
+
+### Typical Development Workflow Using Skills
+
+```
+1.  /strategy-design "MA crossover with RSI filter on EUR/USD H1"
+        → produces strategy/specs/MACrossoverRSI.md
+
+2.  /ea-new MACrossoverRSI mql5
+        → produces ea/mql5/Experts/MACrossoverRSI.mq5
+
+3.  [developer implements logic in MetaEditor, compiles]
+
+4.  /fetch-data EUR_USD H1 2000
+        → downloads data to data/history/EUR_USD/H1.csv
+
+5.  [run backtest in MT5 Strategy Tester, export HTML report]
+
+6.  /backtest-analyze backtest/reports/MACrossoverRSI_20250101.htm
+        → produces backtest/reports/MACrossoverRSI_20250101.md
+
+7.  /risk-check ea/mql5/Experts/MACrossoverRSI.mq5
+        → produces risk/audits/MACrossoverRSI_audit.md
+
+8.  /ea-review ea/mql5/Experts/MACrossoverRSI.mq5
+        → final code quality + risk review
+
+9.  [if all PASS → deploy to MT5 demo for forward testing]
+```
+
+---
+
+---
+
 # Trading Bot & Expert Advisor (EA) Guide
 
 This section documents the standalone trading bot project — separate from the Telegram userbot above. It targets **MetaTrader 4/5 Expert Advisors (MQL)** and **Forex broker REST APIs** (OANDA, IC Markets).
